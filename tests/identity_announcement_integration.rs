@@ -354,6 +354,7 @@ fn fake_agent(last_seen: u64) -> DiscoveredAgent {
         addresses: Vec::new(),
         announced_at: last_seen,
         last_seen,
+        machine_public_key: Vec::new(),
     }
 }
 

@@ -317,6 +317,12 @@ pub struct DiscoveredAgent {
     pub announced_at: u64,
     /// Local timestamp (seconds) when this record was last updated.
     pub last_seen: u64,
+    /// Raw ML-DSA-65 machine public key bytes from the announcement.
+    ///
+    /// Used to verify rendezvous `ProviderSummary` signatures before
+    /// trusting addresses received via the rendezvous shard topic.
+    #[doc(hidden)]
+    pub machine_public_key: Vec<u8>,
 }
 
 /// Builder for configuring an [`Agent`] before connecting to the network.
@@ -424,7 +430,7 @@ impl HeartbeatContext {
             machine_id: unsigned.machine_id,
             user_id: unsigned.user_id,
             agent_certificate: unsigned.agent_certificate,
-            machine_public_key,
+            machine_public_key: machine_public_key.clone(),
             machine_signature,
             addresses: unsigned.addresses,
             announced_at,
@@ -456,6 +462,7 @@ impl HeartbeatContext {
                 addresses: announcement.addresses,
                 announced_at: announcement.announced_at,
                 last_seen: now,
+                machine_public_key: machine_public_key.clone(),
             },
         );
         Ok(())
@@ -642,6 +649,7 @@ impl Agent {
                 addresses: announcement.addresses.clone(),
                 announced_at: announcement.announced_at,
                 last_seen: now,
+                machine_public_key: announcement.machine_public_key.clone(),
             },
         );
 
@@ -764,6 +772,7 @@ impl Agent {
                         addresses: announcement.addresses.clone(),
                         announced_at: announcement.announced_at,
                         last_seen: now,
+                        machine_public_key: announcement.machine_public_key.clone(),
                     },
                 );
             }
@@ -1143,6 +1152,7 @@ impl Agent {
                                     addresses: ann.addresses,
                                     announced_at: ann.announced_at,
                                     last_seen: now,
+                                    machine_public_key: ann.machine_public_key.clone(),
                                 },
                             );
                             return Ok(Some(addrs));
@@ -1273,9 +1283,19 @@ impl Agent {
     /// agent's reachability addresses in the `extensions` field (bincode-encoded
     /// `Vec<SocketAddr>`).
     ///
+    /// # Re-advertisement contract
+    ///
+    /// Rendezvous summaries expire after `validity_ms` milliseconds.  **Callers
+    /// are responsible for calling `advertise_identity` again before expiry** so
+    /// that seekers can always find a fresh record.  A common strategy is to
+    /// re-advertise every `validity_ms / 2`.  The `x0xd` daemon does this
+    /// automatically via its background re-advertisement task.
+    ///
     /// # Arguments
     ///
     /// * `validity_ms` — How long (milliseconds) before the summary expires.
+    ///   After this time, seekers will no longer discover this agent via rendezvous
+    ///   unless a fresh `advertise_identity` call is made.
     ///
     /// # Errors
     ///
@@ -1377,6 +1397,28 @@ impl Agent {
                     };
                     if summary.target != agent_id.0 {
                         continue;
+                    }
+                    // Verify the summary signature when the advertiser's machine
+                    // public key is cached from a prior identity announcement.
+                    // Without a cached key we still accept the addresses — they
+                    // are connection hints only; the subsequent QUIC handshake will
+                    // fail cryptographically if the endpoint is not the genuine agent.
+                    let cached_pub = self
+                        .identity_discovery_cache
+                        .read()
+                        .await
+                        .get(&agent_id)
+                        .map(|e| e.machine_public_key.clone());
+                    if let Some(pub_bytes) = cached_pub {
+                        if !pub_bytes.is_empty()
+                            && !summary.verify_raw(&pub_bytes).unwrap_or(false)
+                        {
+                            tracing::warn!(
+                                "Rendezvous summary signature verification failed for agent {:?}; discarding",
+                                agent_id
+                            );
+                            continue;
+                        }
                     }
                     // Decode addresses from the extensions field.
                     let addrs: Vec<std::net::SocketAddr> = summary
