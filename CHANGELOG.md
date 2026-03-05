@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.3.1] - 2026-03-05
+
+### Fixed
+- **reqwest now uses rustls-tls** — removed hidden OpenSSL dependency; `reqwest` without `default-features = false` silently pulls `native-tls` (OpenSSL on Linux), contradicting the fully-PQC, no-system-crypto design. Switching to `rustls-tls` makes cross-compilation from macOS work without `OPENSSL_DIR` hacks and keeps the entire dependency chain in pure Rust.
+
+### Added
+- **VPS e2e integration test suite** — `tests/vps_e2e_integration.rs` with 4 local tests (no live network required) covering identity announcement, late-join heartbeat discovery, find_agent cache hit, and user identity discovery. Four additional `#[ignore]` variants run against live VPS bootstrap nodes.
+- **CLAUDE.md** — project architecture reference for Claude Code
+
 ## [v0.3.0] - 2026-03-05
 
 ### Added

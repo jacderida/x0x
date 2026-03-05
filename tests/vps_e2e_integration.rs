@@ -41,10 +41,7 @@
 //! explicit bootstrap peer.
 
 use tempfile::TempDir;
-use x0x::{
-    network::NetworkConfig,
-    Agent,
-};
+use x0x::{network::NetworkConfig, Agent};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -105,20 +102,23 @@ fn cfg_b(a_addr: std::net::SocketAddr, vps: bool) -> NetworkConfig {
     }
 }
 
-/// Poll `discovered_agents()` until `target_id` appears or deadline passes.
+/// Rendezvous advertisement validity used in VPS tests: 1 hour in milliseconds.
+const RENDEZVOUS_VALIDITY_MS: u64 = 3_600_000;
+
+/// Poll `discovered_agents()` until `target_id` appears or the timeout elapses.
 async fn wait_for_discovery(
     observer: &Agent,
     target_id: x0x::identity::AgentId,
     timeout: std::time::Duration,
 ) -> bool {
-    let deadline = tokio::time::Instant::now() + timeout;
+    let start = tokio::time::Instant::now();
     loop {
-        if tokio::time::Instant::now() >= deadline {
-            return false;
-        }
         let agents = observer.discovered_agents().await.unwrap_or_default();
         if agents.iter().any(|a| a.agent_id == target_id) {
             return true;
+        }
+        if start.elapsed() >= timeout {
+            return false;
         }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
@@ -206,7 +206,9 @@ async fn test_local_late_join_heartbeat_discovery() {
         .unwrap();
     agent_a.join_network().await.unwrap();
 
-    let a_addr = agent_a.local_addr().expect("agent A must have a bound address");
+    let a_addr = agent_a
+        .local_addr()
+        .expect("agent A must have a bound address");
 
     // B joins 8s after A — after the initial announcement but before the
     // second heartbeat (fires at t ≈ 10s).
@@ -260,7 +262,9 @@ async fn test_local_find_agent_returns_cached_result() {
         .unwrap();
     agent_a.join_network().await.unwrap();
 
-    let a_addr = agent_a.local_addr().expect("agent A must have a bound address");
+    let a_addr = agent_a
+        .local_addr()
+        .expect("agent A must have a bound address");
 
     let agent_b = Agent::builder()
         .with_machine_key(dir_b.path().join("machine.key"))
@@ -282,7 +286,10 @@ async fn test_local_find_agent_returns_cached_result() {
         std::time::Duration::from_secs(10),
     )
     .await;
-    assert!(discovered, "identity listener must populate B's cache from A's announcement");
+    assert!(
+        discovered,
+        "identity listener must populate B's cache from A's announcement"
+    );
 
     // Now find_agent() must return immediately via stage-1 cache hit.
     let result = agent_b
@@ -296,7 +303,10 @@ async fn test_local_find_agent_returns_cached_result() {
     );
 
     let addrs = result.unwrap();
-    assert!(!addrs.is_empty(), "cached entry must include at least one address");
+    assert!(
+        !addrs.is_empty(),
+        "cached entry must include at least one address"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -324,7 +334,9 @@ async fn test_local_user_identity_discovery() {
     agent_a.join_network().await.unwrap();
     agent_a.announce_identity(true, true).await.unwrap();
 
-    let a_addr = agent_a.local_addr().expect("agent A must have a bound address");
+    let a_addr = agent_a
+        .local_addr()
+        .expect("agent A must have a bound address");
 
     let agent_b = Agent::builder()
         .with_machine_key(dir_b.path().join("machine.key"))
@@ -352,7 +364,10 @@ async fn test_local_user_identity_discovery() {
         .await
         .expect("find_agents_by_user must not error");
 
-    assert!(!by_user.is_empty(), "find_agents_by_user should return Agent A");
+    assert!(
+        !by_user.is_empty(),
+        "find_agents_by_user should return Agent A"
+    );
     assert_eq!(by_user[0].agent_id, agent_a.agent_id());
     assert_eq!(by_user[0].user_id, Some(user_id));
 }
@@ -377,7 +392,9 @@ async fn test_vps_identity_announcement_and_discovery() {
         .unwrap();
     agent_a.join_network().await.unwrap();
 
-    let a_addr = agent_a.local_addr().expect("agent A must have a bound address");
+    let a_addr = agent_a
+        .local_addr()
+        .expect("agent A must have a bound address");
 
     let agent_b = Agent::builder()
         .with_machine_key(dir_b.path().join("machine.key"))
@@ -394,7 +411,10 @@ async fn test_vps_identity_announcement_and_discovery() {
         std::time::Duration::from_secs(20),
     )
     .await;
-    assert!(found, "Agent B should discover Agent A within 20s via VPS gossip");
+    assert!(
+        found,
+        "Agent B should discover Agent A within 20s via VPS gossip"
+    );
 
     let discovered = agent_b.discovered_agents().await.unwrap();
     let entry = discovered
@@ -420,7 +440,9 @@ async fn test_vps_late_join_heartbeat_discovery() {
         .await
         .unwrap();
     agent_a.join_network().await.unwrap();
-    let a_addr = agent_a.local_addr().expect("agent A must have a bound address");
+    let a_addr = agent_a
+        .local_addr()
+        .expect("agent A must have a bound address");
 
     tokio::time::sleep(std::time::Duration::from_secs(15)).await;
 
@@ -439,7 +461,10 @@ async fn test_vps_late_join_heartbeat_discovery() {
         std::time::Duration::from_secs(15),
     )
     .await;
-    assert!(found, "Late-joining Agent B should discover Agent A via heartbeat");
+    assert!(
+        found,
+        "Late-joining Agent B should discover Agent A via heartbeat"
+    );
 }
 
 #[ignore = "requires live VPS bootstrap nodes (UDP port 12000 must be accessible)"]
@@ -457,9 +482,14 @@ async fn test_vps_rendezvous_find_agent() {
         .await
         .unwrap();
     agent_a.join_network().await.unwrap();
-    agent_a.advertise_identity(3_600_000).await.unwrap();
+    agent_a
+        .advertise_identity(RENDEZVOUS_VALIDITY_MS)
+        .await
+        .unwrap();
 
-    let a_addr = agent_a.local_addr().expect("agent A must have a bound address");
+    let a_addr = agent_a
+        .local_addr()
+        .expect("agent A must have a bound address");
 
     let agent_b = Agent::builder()
         .with_machine_key(dir_b.path().join("machine.key"))
@@ -475,7 +505,10 @@ async fn test_vps_rendezvous_find_agent() {
         .await
         .expect("find_agent must not error");
 
-    assert!(result.is_some(), "find_agent should locate Agent A within 10s");
+    assert!(
+        result.is_some(),
+        "find_agent should locate Agent A within 10s"
+    );
 }
 
 #[ignore = "requires live VPS bootstrap nodes (UDP port 12000 must be accessible)"]
@@ -498,7 +531,9 @@ async fn test_vps_user_identity_discovery() {
     agent_a.join_network().await.unwrap();
     agent_a.announce_identity(true, true).await.unwrap();
 
-    let a_addr = agent_a.local_addr().expect("agent A must have a bound address");
+    let a_addr = agent_a
+        .local_addr()
+        .expect("agent A must have a bound address");
 
     let agent_b = Agent::builder()
         .with_machine_key(dir_b.path().join("machine.key"))
@@ -522,7 +557,10 @@ async fn test_vps_user_identity_discovery() {
         .await
         .expect("find_agents_by_user must not error");
 
-    assert!(!by_user.is_empty(), "find_agents_by_user must return Agent A");
+    assert!(
+        !by_user.is_empty(),
+        "find_agents_by_user must return Agent A"
+    );
     assert_eq!(by_user[0].agent_id, agent_a.agent_id());
     assert_eq!(by_user[0].user_id, Some(user_id));
 }
