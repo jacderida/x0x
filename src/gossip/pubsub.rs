@@ -338,9 +338,16 @@ impl PubSubManager {
     /// is subscribed would never receive messages on that topic from this node.
     pub async fn refresh_topic_peers(&self) {
         let topics: Vec<String> = self.topic_ref_counts.read().await.keys().cloned().collect();
+        let peers: Vec<PeerId> = self
+            .network
+            .connected_peers()
+            .await
+            .into_iter()
+            .map(|peer| PeerId::new(peer.0))
+            .collect();
         for topic in topics {
             let topic_id = TopicId::from_entity(topic.as_bytes());
-            self.initialize_topic_peers(topic_id).await;
+            self.plumtree.set_topic_peers(topic_id, peers.clone()).await;
         }
     }
 
