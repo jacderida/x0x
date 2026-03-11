@@ -994,39 +994,23 @@ impl Agent {
             return Ok(());
         }
 
-        // Seed hardcoded bootstrap nodes into the cache so they are never evicted.
-        if let Some(ref cache) = self.bootstrap_cache {
-            for addr in &bootstrap_nodes {
-                // Use a deterministic PeerId derived from the address bytes.
-                let addr_bytes = addr.to_string();
-                let hash = blake3::hash(addr_bytes.as_bytes());
-                let peer_id = ant_quic::PeerId(*hash.as_bytes());
-                cache.add_seed(peer_id, vec![*addr]).await;
-            }
-        }
-
         let min_connected = 3;
         let mut all_connected: Vec<std::net::SocketAddr> = Vec::new();
 
-        // Phase 1: Try cached peers first (if cache has peers beyond seeds).
+        // Phase 1: Try cached peers first using the real ant-quic peer IDs.
         if let Some(ref cache) = self.bootstrap_cache {
             const PHASE1_PEER_CANDIDATES: usize = 12;
             let cached_peers = cache.select_peers(PHASE1_PEER_CANDIDATES).await;
-            let cached_addrs: Vec<std::net::SocketAddr> = cached_peers
-                .iter()
-                .flat_map(|p| p.addresses.iter().copied())
-                .filter(|addr| !bootstrap_nodes.contains(addr))
-                .collect();
-            if !cached_addrs.is_empty() {
-                tracing::info!("Phase 1: Trying {} cached peers", cached_addrs.len());
+            if !cached_peers.is_empty() {
+                tracing::info!("Phase 1: Trying {} cached peers", cached_peers.len());
                 let (succeeded, _failed) = self
-                    .connect_peers_parallel_tracked(network, &cached_addrs)
+                    .connect_cached_peers_parallel_tracked(network, &cached_peers)
                     .await;
                 all_connected.extend(&succeeded);
                 tracing::info!(
                     "Phase 1: {}/{} cached peers connected",
                     succeeded.len(),
-                    cached_addrs.len()
+                    cached_peers.len()
                 );
             }
         }
@@ -1107,6 +1091,45 @@ impl Agent {
         }
 
         Ok(())
+    }
+
+    /// Connect to cached peers in parallel, returning (succeeded, failed) peer lists.
+    async fn connect_cached_peers_parallel_tracked(
+        &self,
+        network: &std::sync::Arc<network::NetworkNode>,
+        peers: &[ant_quic::CachedPeer],
+    ) -> (Vec<std::net::SocketAddr>, Vec<ant_quic::PeerId>) {
+        let handles: Vec<_> = peers
+            .iter()
+            .map(|peer| {
+                let net = network.clone();
+                let peer_id = peer.peer_id;
+                tokio::spawn(async move {
+                    tracing::debug!("Connecting to cached peer: {:?}", peer_id);
+                    match net.connect_cached_peer(peer_id).await {
+                        Ok(addr) => {
+                            tracing::info!("Connected to cached peer {:?} at {}", peer_id, addr);
+                            Ok(addr)
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to connect to cached peer {:?}: {}", peer_id, e);
+                            Err(peer_id)
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        let mut succeeded = Vec::new();
+        let mut failed = Vec::new();
+        for handle in handles {
+            match handle.await {
+                Ok(Ok(addr)) => succeeded.push(addr),
+                Ok(Err(peer_id)) => failed.push(peer_id),
+                Err(e) => tracing::error!("Connection task panicked: {}", e),
+            }
+        }
+        (succeeded, failed)
     }
 
     /// Connect to multiple peers in parallel, returning (succeeded, failed) address lists.
