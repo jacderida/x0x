@@ -335,6 +335,71 @@ impl NetworkNode {
         let _ = self.event_sender.send(event);
     }
 
+    /// Connect to a cached peer using its expected peer ID.
+    ///
+    /// Tries the cached addresses for `peer_id` until one resolves back to the
+    /// same authenticated peer. Stale cache entries that now point at a
+    /// different peer are rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NetworkError` if the peer is not cached or none of its cached
+    /// addresses lead back to the expected peer.
+    pub async fn connect_cached_peer(&self, peer_id: AntPeerId) -> NetworkResult<SocketAddr> {
+        if self.is_connected(&peer_id).await {
+            let node_guard = self.node.read().await;
+            if let Some(node) = node_guard.as_ref() {
+                if let Some(addr) = node
+                    .connected_peers()
+                    .await
+                    .into_iter()
+                    .find(|conn| conn.peer_id == peer_id)
+                    .and_then(|conn| match conn.remote_addr {
+                        TransportAddr::Udp(addr) => Some(addr),
+                        _ => None,
+                    })
+                {
+                    return Ok(addr);
+                }
+            }
+        }
+
+        let cache = self.bootstrap_cache.as_ref().ok_or_else(|| {
+            NetworkError::ConnectionFailed("bootstrap cache not configured".to_string())
+        })?;
+        let cached_peer = cache.get_peer(&peer_id).await.ok_or_else(|| {
+            NetworkError::ConnectionFailed(format!(
+                "peer {:?} not found in bootstrap cache",
+                peer_id
+            ))
+        })?;
+
+        for addr in &cached_peer.addresses {
+            match self.connect_addr(*addr).await {
+                Ok(connected_peer) if connected_peer == peer_id => return Ok(*addr),
+                Ok(connected_peer) => {
+                    warn!(
+                        "Cached address {} for peer {:?} resolved to unexpected peer {:?}",
+                        addr, peer_id, connected_peer
+                    );
+                }
+                Err(e) => {
+                    debug!(
+                        "Cached dial to peer {:?} at {} failed: {}",
+                        peer_id, addr, e
+                    );
+                }
+            }
+        }
+
+        cache.record_failure(&peer_id).await;
+        Err(NetworkError::ConnectionFailed(format!(
+            "peer {:?} not reachable via {} cached addresses",
+            peer_id,
+            cached_peer.addresses.len()
+        )))
+    }
+
     /// Connect to a peer by address.
     ///
     /// # Arguments
@@ -731,36 +796,11 @@ impl saorsa_gossip_transport::GossipTransport for NetworkNode {
         // HyParView exchanges PeerIds via SHUFFLE without addresses, so peers
         // in the passive/active view may not yet have a QUIC connection.
         if !self.is_connected(&ant_peer).await {
-            let mut connected = false;
-
-            // First, try to find the peer's address in our bootstrap cache
-            if let Some(ref cache) = self.bootstrap_cache {
-                let all_peers = cache.all_peers().await;
-                for cached in &all_peers {
-                    if cached.peer_id == ant_peer {
-                        for addr in &cached.addresses {
-                            debug!(
-                                "Auto-dialing peer {:?} at {} (from bootstrap cache)",
-                                peer, addr
-                            );
-                            if self.connect_addr(*addr).await.is_ok() {
-                                connected = true;
-                                break;
-                            }
-                        }
-                        break;
-                    }
-                }
-            }
-
-            // If not in cache, fail immediately. NAT traversal is too slow
-            // (30s timeout) and blocks the gossip message dispatcher. Peers
-            // will be added to the cache via identity announcements; the next
-            // SHUFFLE/SWIM cycle will retry and find them.
-            if !connected {
+            if let Err(e) = self.connect_cached_peer(ant_peer).await {
                 return Err(anyhow::anyhow!(
-                    "Peer {:?} not connected and not found in bootstrap cache",
+                    "Peer {:?} not connected and bootstrap cache dial failed: {}",
                     peer,
+                    e,
                 ));
             }
         }
