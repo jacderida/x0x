@@ -247,7 +247,7 @@ impl PubSubManager {
         // Plumtree registers subscribers on a spawned task; yield once so
         // immediate local publishes in the same task see this subscriber.
         tokio::task::yield_now().await;
-        let (tx, rx) = mpsc::channel(100);
+        let (tx, rx) = mpsc::channel(10_000);
         let contacts = self.contacts.get().cloned();
 
         {
@@ -255,13 +255,29 @@ impl PubSubManager {
             *counts.entry(topic.clone()).or_insert(0) += 1;
         }
 
+        let sub_topic = topic.clone();
         tokio::spawn(async move {
             while let Some((_peer, encoded_payload)) = plumtree_rx.recv().await {
+                tracing::info!(
+                    topic = %sub_topic,
+                    payload_len = encoded_payload.len(),
+                    "[4/6 pubsub] received from PlumTree, decoding"
+                );
                 let Some(message) = decode_for_delivery(encoded_payload, contacts.as_ref()).await
                 else {
+                    tracing::warn!(
+                        topic = %sub_topic,
+                        "[4/6 pubsub] decode_for_delivery returned None, skipping"
+                    );
                     continue;
                 };
+                tracing::info!(
+                    topic = %sub_topic,
+                    msg_topic = %message.topic,
+                    "[4/6 pubsub] decoded, forwarding to subscriber channel"
+                );
                 if tx.send(message).await.is_err() {
+                    tracing::info!(topic = %sub_topic, "[4/6 pubsub] subscriber channel closed");
                     break;
                 }
             }

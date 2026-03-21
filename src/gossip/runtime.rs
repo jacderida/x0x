@@ -128,6 +128,11 @@ impl GossipRuntime {
                 {
                     Ok((peer, stream_type, data)) => match stream_type {
                         GossipStreamType::PubSub => {
+                            tracing::info!(
+                                from = %peer,
+                                bytes = data.len(),
+                                "[2/6 runtime] dispatching PubSub message to handle_incoming"
+                            );
                             pubsub.handle_incoming(peer, data).await;
                         }
                         GossipStreamType::Membership => {
