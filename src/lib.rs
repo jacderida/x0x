@@ -1086,10 +1086,8 @@ impl Agent {
                     && !announcement.addresses.is_empty()
                     && !auto_connect_attempted.contains(&announcement.agent_id)
                 {
-                    if let (Some(ref net), Some(transport_id)) =
-                        (&network, announcement.transport_peer_id)
-                    {
-                        let ant_peer = ant_quic::PeerId(transport_id);
+                    if let Some(ref net) = &network {
+                        let ant_peer = ant_quic::PeerId(announcement.machine_id.0);
                         if !net.is_connected(&ant_peer).await {
                             auto_connect_attempted.insert(announcement.agent_id);
                             let net = std::sync::Arc::clone(net);
