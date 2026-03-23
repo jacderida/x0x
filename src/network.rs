@@ -195,6 +195,10 @@ impl NetworkNode {
     /// # Arguments
     ///
     /// * `config` - Network configuration options.
+    /// * `bootstrap_cache` - Optional bootstrap peer cache for quality-scored reconnection.
+    /// * `keypair` - Optional ML-DSA-65 keypair for identity unification. When provided,
+    ///   the ant-quic `Node` uses this keypair for QUIC TLS, making the transport PeerId
+    ///   equal to the x0x MachineId derived from the same key.
     ///
     /// # Returns
     ///
@@ -206,6 +210,7 @@ impl NetworkNode {
     pub async fn new(
         config: NetworkConfig,
         bootstrap_cache: Option<Arc<ant_quic::BootstrapCache>>,
+        keypair: Option<(ant_quic::MlDsaPublicKey, ant_quic::MlDsaSecretKey)>,
     ) -> NetworkResult<Self> {
         let mut builder = NodeConfig::builder();
 
@@ -215,6 +220,11 @@ impl NetworkNode {
 
         for peer_addr in &config.bootstrap_nodes {
             builder = builder.known_peer(*peer_addr);
+        }
+
+        // Pass the machine keypair to ant-quic so that transport PeerId == MachineId
+        if let Some((pk, sk)) = keypair {
+            builder = builder.keypair(pk, sk);
         }
 
         let node = Node::with_config(builder.build()).await.map_err(|e| {
@@ -900,7 +910,7 @@ mod tests {
     #[tokio::test]
     async fn test_gossip_transport_trait() {
         let config = NetworkConfig::default();
-        let node = NetworkNode::new(config, None).await.unwrap();
+        let node = NetworkNode::new(config, None, None).await.unwrap();
 
         // Test local_peer_id() method
         let peer_id = node.local_peer_id();
@@ -979,7 +989,7 @@ mod tests {
 #[tokio::test]
 async fn test_network_node_subscribe_events() {
     let config = NetworkConfig::default();
-    let node = NetworkNode::new(config, None).await.unwrap();
+    let node = NetworkNode::new(config, None, None).await.unwrap();
 
     // Subscribe to events
     let mut receiver = node.subscribe();
@@ -1007,7 +1017,7 @@ async fn test_network_node_subscribe_events() {
 #[tokio::test]
 async fn test_network_node_multiple_subscribers() {
     let config = NetworkConfig::default();
-    let node = NetworkNode::new(config, None).await.unwrap();
+    let node = NetworkNode::new(config, None, None).await.unwrap();
 
     // Multiple subscribers
     let mut rx1 = node.subscribe();
@@ -1055,7 +1065,7 @@ async fn test_mesh_connections_are_bidirectional() {
             peer_cache_path: None,
         };
 
-        let node = NetworkNode::new(config, None).await.unwrap();
+        let node = NetworkNode::new(config, None, None).await.unwrap();
         nodes.push(node);
     }
 

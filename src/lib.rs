@@ -205,11 +205,6 @@ struct IdentityAnnouncementUnsigned {
     machine_public_key: Vec<u8>,
     addresses: Vec<std::net::SocketAddr>,
     announced_at: u64,
-    /// QUIC transport PeerId (ant-quic PeerId) for this node.
-    /// Used by receiving agents to map announced addresses to the correct
-    /// bootstrap cache entry for auto-dial.
-    #[serde(default)]
-    transport_peer_id: Option<[u8; 32]>,
 }
 
 /// Signed identity announcement broadcast by agents.
@@ -234,9 +229,6 @@ pub struct IdentityAnnouncement {
     pub addresses: Vec<std::net::SocketAddr>,
     /// Unix timestamp (seconds) of announcement creation.
     pub announced_at: u64,
-    /// QUIC transport PeerId (ant-quic PeerId) for this node.
-    #[serde(default)]
-    pub transport_peer_id: Option<[u8; 32]>,
 }
 
 impl IdentityAnnouncement {
@@ -249,7 +241,6 @@ impl IdentityAnnouncement {
             machine_public_key: self.machine_public_key.clone(),
             addresses: self.addresses.clone(),
             announced_at: self.announced_at,
-            transport_peer_id: self.transport_peer_id,
         }
     }
 
@@ -419,7 +410,6 @@ impl HeartbeatContext {
             None => Vec::new(),
         };
 
-        let transport_peer_id = Some(self.network.peer_id().0);
         let unsigned = IdentityAnnouncementUnsigned {
             agent_id: self.identity.agent_id(),
             machine_id: self.identity.machine_id(),
@@ -431,7 +421,6 @@ impl HeartbeatContext {
             machine_public_key: machine_public_key.clone(),
             addresses,
             announced_at,
-            transport_peer_id,
         };
         let unsigned_bytes = bincode::serialize(&unsigned).map_err(|e| {
             error::IdentityError::Serialization(format!(
@@ -460,7 +449,6 @@ impl HeartbeatContext {
             machine_signature,
             addresses: unsigned.addresses,
             announced_at,
-            transport_peer_id,
         };
         let encoded = bincode::serialize(&announcement).map_err(|e| {
             error::IdentityError::Serialization(format!(
@@ -824,18 +812,17 @@ impl Agent {
 
                 // Add announced addresses to the bootstrap cache so auto-dial
                 // can connect to peers discovered via gossip announcements.
+                // After identity unification, machine_id == ant-quic PeerId.
                 if !announcement.addresses.is_empty() {
-                    if let (Some(ref bc), Some(transport_id)) =
-                        (&bootstrap_cache, announcement.transport_peer_id)
-                    {
-                        let peer_id = ant_quic::PeerId(transport_id);
+                    if let Some(ref bc) = &bootstrap_cache {
+                        let peer_id = ant_quic::PeerId(announcement.machine_id.0);
                         bc.add_from_connection(peer_id, announcement.addresses.clone(), None)
                             .await;
                         tracing::debug!(
-                            "Added {} addresses from identity announcement to bootstrap cache for agent {:?} (transport {:?})",
+                            "Added {} addresses from identity announcement to bootstrap cache for agent {:?} (machine {:?})",
                             announcement.addresses.len(),
                             announcement.agent_id,
-                            hex::encode(&transport_id[..8]),
+                            hex::encode(&announcement.machine_id.0[..8]),
                         );
                     }
                 }
@@ -919,7 +906,6 @@ impl Agent {
             .public_key()
             .as_bytes()
             .to_vec();
-        let transport_peer_id = self.network.as_ref().map(|n| n.peer_id().0);
         let unsigned = IdentityAnnouncementUnsigned {
             agent_id: self.agent_id(),
             machine_id: self.machine_id(),
@@ -928,7 +914,6 @@ impl Agent {
             machine_public_key: machine_public_key.clone(),
             addresses,
             announced_at: Self::unix_timestamp_secs(),
-            transport_peer_id,
         };
         let unsigned_bytes = bincode::serialize(&unsigned).map_err(|e| {
             error::IdentityError::Serialization(format!(
@@ -957,7 +942,6 @@ impl Agent {
             machine_signature,
             addresses: unsigned.addresses,
             announced_at: unsigned.announced_at,
-            transport_peer_id,
         })
     }
 
@@ -2048,15 +2032,45 @@ impl AgentBuilder {
         };
 
         // Create network node if configured
+        // Pass the machine keypair so ant-quic PeerId == MachineId (identity unification)
+        let machine_keypair = {
+            let pk = ant_quic::MlDsaPublicKey::from_bytes(
+                identity.machine_keypair().public_key().as_bytes(),
+            )
+            .map_err(|e| {
+                error::IdentityError::Storage(std::io::Error::other(format!(
+                    "invalid machine public key: {e}"
+                )))
+            })?;
+            let sk = ant_quic::MlDsaSecretKey::from_bytes(
+                identity.machine_keypair().secret_key().as_bytes(),
+            )
+            .map_err(|e| {
+                error::IdentityError::Storage(std::io::Error::other(format!(
+                    "invalid machine secret key: {e}"
+                )))
+            })?;
+            Some((pk, sk))
+        };
+
         let network = if let Some(config) = self.network_config {
-            let node = network::NetworkNode::new(config, bootstrap_cache.clone())
-                .await
-                .map_err(|e| {
-                    error::IdentityError::Storage(std::io::Error::other(format!(
-                        "network initialization failed: {}",
-                        e
-                    )))
-                })?;
+            let node =
+                network::NetworkNode::new(config, bootstrap_cache.clone(), machine_keypair)
+                    .await
+                    .map_err(|e| {
+                        error::IdentityError::Storage(std::io::Error::other(format!(
+                            "network initialization failed: {}",
+                            e
+                        )))
+                    })?;
+
+            // Verify identity unification: ant-quic PeerId must equal MachineId
+            debug_assert_eq!(
+                node.peer_id().0,
+                identity.machine_id().0,
+                "ant-quic PeerId must equal MachineId after identity unification"
+            );
+
             Some(std::sync::Arc::new(node))
         } else {
             None
