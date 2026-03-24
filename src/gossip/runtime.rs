@@ -21,6 +21,7 @@ pub struct GossipRuntime {
     peer_id: PeerId,
     dispatcher_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     peer_sync_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    keepalive_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl std::fmt::Debug for GossipRuntime {
@@ -76,6 +77,7 @@ impl GossipRuntime {
             peer_id,
             dispatcher_handle: std::sync::Mutex::new(None),
             peer_sync_handle: std::sync::Mutex::new(None),
+            keepalive_handle: std::sync::Mutex::new(None),
         })
     }
 
@@ -179,7 +181,7 @@ impl GossipRuntime {
         // See ADR-0002 for rationale.
         let keepalive_membership = Arc::clone(&self.membership);
         let keepalive_network = Arc::clone(&self.network);
-        tokio::spawn(async move {
+        let keepalive_handle = tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(15)).await;
 
@@ -195,6 +197,10 @@ impl GossipRuntime {
                 }
             }
         });
+
+        if let Ok(mut guard) = self.keepalive_handle.lock() {
+            *guard = Some(keepalive_handle);
+        }
 
         match self.dispatcher_handle.lock() {
             Ok(mut guard) => *guard = Some(handle),
@@ -215,6 +221,11 @@ impl GossipRuntime {
     ///
     /// Returns an error if shutdown fails.
     pub async fn shutdown(&self) -> NetworkResult<()> {
+        if let Ok(mut guard) = self.keepalive_handle.lock() {
+            if let Some(handle) = guard.take() {
+                handle.abort();
+            }
+        }
         if let Ok(mut guard) = self.peer_sync_handle.lock() {
             if let Some(handle) = guard.take() {
                 handle.abort();

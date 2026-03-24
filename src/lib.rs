@@ -1091,20 +1091,25 @@ impl Agent {
                         if !net.is_connected(&ant_peer).await {
                             auto_connect_attempted.insert(announcement.agent_id);
                             let net = std::sync::Arc::clone(net);
-                            let addr = announcement.addresses[0];
+                            let addresses = announcement.addresses.clone();
                             tokio::spawn(async move {
-                                match net.connect_addr(addr).await {
-                                    Ok(_) => {
-                                        tracing::info!(
-                                            "Auto-connected to discovered agent at {addr}",
-                                        );
-                                    }
-                                    Err(e) => {
-                                        tracing::debug!(
-                                            "Auto-connect to discovered agent at {addr} failed: {e}",
-                                        );
+                                for addr in &addresses {
+                                    match net.connect_addr(*addr).await {
+                                        Ok(_) => {
+                                            tracing::info!(
+                                                "Auto-connected to discovered agent at {addr}",
+                                            );
+                                            return;
+                                        }
+                                        Err(e) => {
+                                            tracing::debug!("Auto-connect to {addr} failed: {e}",);
+                                        }
                                     }
                                 }
+                                tracing::debug!(
+                                    "Auto-connect exhausted all {} addresses for discovered agent",
+                                    addresses.len(),
+                                );
                             });
                         }
                     }
